@@ -38,8 +38,14 @@ def main() -> None:
     # Create application with persistence
     application = ApplicationBuilder().token(token).persistence(persistence).build()
     
-    # Record bot start time
-    application.bot_data["start_time"] = datetime.now().isoformat()
+    # Record bot start time - will be persisted automatically
+    if "start_time" not in application.bot_data:
+        start_time = datetime.now()
+        application.bot_data["start_time"] = start_time.isoformat()
+        logger.info(f"Setting bot start time: {start_time.isoformat()}")
+        # Note: Persistence will be handled automatically by the framework
+    else:
+        logger.info(f"Start time already exists: {application.bot_data['start_time']}")
     
     # Register handlers
     register_basic_handlers(application)

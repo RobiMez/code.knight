@@ -169,24 +169,44 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             elif chat_type == "channel":
                 channels += 1
             
-            # Count filters
-            chat_data = context.application.chat_data.get(chat_id, {})
-            filters_count = len(chat_data.get("filter_patterns", []))
-            total_filters += filters_count
+            # Count filters - DISABLED since filters are disabled
+            # chat_data = context.application.chat_data.get(chat_id, {})
+            # filters_count = len(chat_data.get("filter_patterns", []))
+            # total_filters += filters_count
     
     # Bot uptime
-    bot_start_time = context.bot_data.get("start_time", "Unknown")
+    bot_start_time = context.bot_data.get("start_time")
     uptime_str = "Unknown"
-    if bot_start_time != "Unknown":
+    
+    # If no start_time exists, initialize it now as a fallback
+    if not bot_start_time:
+        logger.warning("No start_time found in bot_data, initializing now")
+        current_time = datetime.now()
+        context.bot_data["start_time"] = current_time.isoformat()
+        bot_start_time = current_time.isoformat()
         try:
-            start_time = datetime.fromisoformat(bot_start_time)
+            await context.application.update_persistence()
+            logger.info("Initialized start_time and updated persistence")
+        except Exception as e:
+            logger.error(f"Failed to update persistence with new start_time: {e}")
+    
+    if bot_start_time:
+        try:
+            # Handle both string and datetime objects
+            if isinstance(bot_start_time, str):
+                start_time = datetime.fromisoformat(bot_start_time)
+            else:
+                start_time = bot_start_time
+                
             uptime = datetime.now() - start_time
             days = uptime.days
             hours, remainder = divmod(uptime.seconds, 3600)
             minutes, seconds = divmod(remainder, 60)
             uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+            logger.info(f"Calculated uptime: {uptime_str}")
         except Exception as e:
             logger.error(f"Error calculating uptime: {e}")
+            logger.error(f"Start time value: {bot_start_time}, type: {type(bot_start_time)}")
             uptime_str = "Error calculating"
     
     # Format statistics
@@ -198,8 +218,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"• Groups: {groups}\n"
         f"• Supergroups: {supergroups}\n"
         f"• Channels: {channels}\n\n"
-        f"*Filters:*\n"
-        f"• Total filter patterns: {total_filters}\n\n"
+        # f"*Filters:*\n"
+        # f"• Total filter patterns: {total_filters}\n\n"
         f"*Performance:*\n"
         f"• Bot uptime: {uptime_str}\n"
     )

@@ -10,10 +10,11 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import BadRequest
-from handlers.conversation import admin_only
+from handlers.conversation import admin_only, only_target_group
 
 logger = logging.getLogger("telegram_bot")
 
+@only_target_group
 @admin_only
 async def add_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Add a regex pattern to the filter list."""
@@ -52,6 +53,7 @@ async def add_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Filter pattern '{pattern}' already exists.")
 
 
+@only_target_group
 @admin_only
 async def remove_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove a regex pattern from the filter list."""
@@ -113,6 +115,7 @@ async def remove_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+@only_target_group
 async def list_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all regex patterns in the filter list."""
     if "filter_patterns" not in context.chat_data or not context.chat_data["filter_patterns"]:
@@ -162,6 +165,22 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"  Forward origin: None")
             
         logger.info("---")
+
+    # Only process in target group
+    chat = update.effective_chat
+    if not chat:
+        return
+    chat_username = getattr(chat, "username", None)
+    target_id = context.application.bot_data.get("target_group_id")
+    if target_id is None:
+        try:
+            target_chat = await context.bot.get_chat("@codenight")
+            context.application.bot_data["target_group_id"] = target_chat.id
+            target_id = target_chat.id
+        except Exception:
+            target_id = None
+    if not ((chat_username and chat_username.lower() == "codenight") or (target_id is not None and chat.id == target_id)):
+        return
 
     # Check channel filter first - delete messages from external channels if enabled
     # BUT skip automatic forwards and whitelisted channels
@@ -285,6 +304,7 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error deleting notification message: {e}")
 
 
+@only_target_group
 async def regex_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show helpful regex patterns that can be used with filters."""
     help_text = """
@@ -319,6 +339,7 @@ Here are some common regex patterns you can use:
     logger.info(f"Regex help requested by user {update.effective_user.id} in chat {update.effective_chat.id}")
 
 
+@only_target_group
 @admin_only
 async def whitelist_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Add a channel to the whitelist."""
@@ -350,6 +371,7 @@ async def whitelist_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"'{channel_identifier}' is already whitelisted")
 
 
+@only_target_group
 @admin_only
 async def unwhitelist_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove a channel from the whitelist."""
@@ -381,6 +403,7 @@ async def unwhitelist_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"'{channel_identifier}' is not in the whitelist")
 
 
+@only_target_group
 async def list_whitelisted_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all whitelisted channels."""
     if "channelWhitelist" not in context.chat_data or not context.chat_data["channelWhitelist"]:
@@ -402,19 +425,22 @@ async def list_whitelisted_channels(update: Update, context: ContextTypes.DEFAUL
 
 def register_filter_handlers(application):
     """Register filter handlers with the application."""
-    # Command handlers
-    application.add_handler(CommandHandler("add_filter", add_filter))
-    application.add_handler(CommandHandler("remove_filter", remove_filter))
-    application.add_handler(CommandHandler("list_filters", list_filters))
-    application.add_handler(CommandHandler("regex_help", regex_help))
-    application.add_handler(CommandHandler("whitelist_channel", whitelist_channel))
-    application.add_handler(CommandHandler("unwhitelist_channel", unwhitelist_channel))
-    application.add_handler(CommandHandler("list_whitelisted_channels", list_whitelisted_channels))
+    # # Command handlers
+    # application.add_handler(CommandHandler("add_filter", add_filter))
+    # application.add_handler(CommandHandler("remove_filter", remove_filter))
+    # application.add_handler(CommandHandler("list_filters", list_filters))
+    # application.add_handler(CommandHandler("regex_help", regex_help))
+    # application.add_handler(CommandHandler("whitelist_channel", whitelist_channel))
+    # application.add_handler(CommandHandler("unwhitelist_channel", unwhitelist_channel))
+    # application.add_handler(CommandHandler("list_whitelisted_channels", list_whitelisted_channels))
     
-    # Single message filter handler that handles both channel filtering and regex filtering
-    application.add_handler(MessageHandler(
-        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, 
-        filter_message
-    ), group=1)
+    # # Single message filter handler that handles both channel filtering and regex filtering
+    # application.add_handler(MessageHandler(
+    #     (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, 
+    #     filter_message
+    # ), group=1)
     
-    logger.info("Filter handlers registered") 
+    logger.info("Disabled filter handlers") 
+    # logger.info(
+    #     "Command categories: JANITOR-BASED FEATURES => ['regex filters', 'channel filter when enabled']"
+    # )

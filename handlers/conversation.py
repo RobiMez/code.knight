@@ -11,6 +11,53 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("telegram_bot")
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete a message - used for self-destructing notifications."""
+    job_data = context.job.data
+    chat_id = job_data.get('chat_id')
+    message_id = job_data.get('message_id')
+    
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.debug(f"Deleted notification message {message_id} in chat {chat_id}")
+    except Exception as e:
+        logger.error(f"Error deleting notification message: {e}")
+
+# Target group restriction
+TARGET_GROUP_USERNAME = "cmsv2"
+
+
+def only_target_group(func):
+    """Decorator: allow execution only in the target group @codenight."""
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        try:
+            chat = update.effective_chat
+            if not chat:
+                return
+            chat_username = getattr(chat, "username", None)
+            if chat_username and chat_username.lower() == TARGET_GROUP_USERNAME.lower():
+                return await func(update, context, *args, **kwargs)
+            target_id = context.application.bot_data.get("target_group_id")
+            if target_id is None and TARGET_GROUP_USERNAME:
+                try:
+                    target_chat = await context.bot.get_chat(f"@{TARGET_GROUP_USERNAME}")
+                    context.application.bot_data["target_group_id"] = target_chat.id
+                    target_id = target_chat.id
+                except Exception as e:
+                    logger.error(f"Failed to resolve target group id: {e}")
+            if target_id is not None and chat.id == target_id:
+                return await func(update, context, *args, **kwargs)
+            await update.message.reply_text(f"Sorry im built for @{TARGET_GROUP_USERNAME}. Go there to use me.")
+            logger.debug(
+                f"Ignored command in non-target chat id={chat.id}, username={chat_username}"
+            )
+            return
+        except Exception as e:
+            logger.error(f"Error in only_target_group wrapper: {e}")
+            return
+    return wrapped
+
 async def is_user_admin(update: Update) -> bool:
     """Check if the user is an admin in the chat."""
     try:
@@ -54,6 +101,7 @@ def admin_only(func):
     return wrapped
 
 
+@only_target_group
 @admin_only
 async def enable_janitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Enable the janitor feature in this chat."""
@@ -63,6 +111,7 @@ async def enable_janitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Janitor enabled in chat {update.effective_chat.id}")
 
 
+@only_target_group
 @admin_only
 async def disable_janitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Disable the janitor feature in this chat."""
@@ -72,42 +121,36 @@ async def disable_janitor(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     logger.info(f"Janitor disabled in chat {update.effective_chat.id}")
 
 
+@only_target_group
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display the current settings."""
-    janitor_status = context.chat_data.get("janitorEnabled", False)
-    channel_filter_status = context.chat_data.get("channelFilterEnabled", False)
+    # janitor_status = context.chat_data.get("janitorEnabled", False)  # DISABLED
+    # channel_filter_status = context.chat_data.get("channelFilterEnabled", False)  # DISABLED
     fsp_status = context.chat_data.get("forwardSpamProtectionEnabled", False)
     
-    # Count filter patterns
-    filter_count = 0
-    if "filter_patterns" in context.chat_data and context.chat_data["filter_patterns"]:
-        filter_count = len(context.chat_data["filter_patterns"])
+    # Count filter patterns - DISABLED since filters are disabled
+    # filter_count = 0
+    # if "filter_patterns" in context.chat_data and context.chat_data["filter_patterns"]:
+    #     filter_count = len(context.chat_data["filter_patterns"])
     
-    janitor_text = "enabled" if janitor_status else "disabled"
-    channel_filter_text = "enabled" if channel_filter_status else "disabled"
+    # janitor_text = "enabled" if janitor_status else "disabled"  # DISABLED
+    # channel_filter_text = "enabled" if channel_filter_status else "disabled"  # DISABLED
     fsp_text = "enabled" if fsp_status else "disabled"
     
     status_text = f"""
 *Current settings for this chat:*
 
-🧹 *Janitor:* {janitor_text}
-📺 *Channel Filter:* {channel_filter_text}
 🔁 *Forward Spam Protection:* {fsp_text}
-🔍 *Active Filters:* {filter_count} pattern(s)
 
 *Available Commands:*
-• `/enable_janitor` / `/disable_janitor` - Toggle message filtering
-• `/toggle_channel_filter` - Toggle external channel message filtering
 • `/toggle_forward_spam` - Toggle forward spam protection (delete repeated forwards within 24h)
-• `/add_filter <pattern>` - Add regex filter
-• `/remove_filter <number>` - Remove filter
-• `/list_filters` - Show all filters
     """
     
     await update.message.reply_text(status_text, parse_mode="Markdown")
     logger.info(f"Settings displayed for chat {update.effective_chat.id}")
 
 
+@only_target_group
 @admin_only
 async def toggle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle forward spam protection for the chat."""
@@ -181,6 +224,22 @@ def _make_forward_key(message) -> str | None:
 async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete forwarded messages repeated within 24 hours when protection is enabled."""
     try:
+        # Only process in target group
+        chat = update.effective_chat
+        if not chat:
+            return
+        chat_username = getattr(chat, "username", None)
+        target_id = context.application.bot_data.get("target_group_id")
+        if target_id is None and TARGET_GROUP_USERNAME:
+            try:
+                target_chat = await context.bot.get_chat(f"@{TARGET_GROUP_USERNAME}")
+                context.application.bot_data["target_group_id"] = target_chat.id
+                target_id = target_chat.id
+            except Exception:
+                target_id = None
+        if not ((chat_username and chat_username.lower() == TARGET_GROUP_USERNAME.lower()) or (target_id is not None and chat.id == target_id)):
+            return
+
         if not context.chat_data.get("forwardSpamProtectionEnabled", False):
             return
 
@@ -286,9 +345,19 @@ async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         is_admin = await is_user_admin(update)
 
         if is_admin:
-            await update.message.reply_text(f"✅ {who} is an admin in this chat.")
+            response = await update.message.reply_text(f"✅ {who} is an admin in this chat.")
         else:
-            await update.message.reply_text(f"❌ {who} is NOT an admin in this chat.")
+            response = await update.message.reply_text(f"❌ {who} is NOT an admin in this chat.")
+
+        # Schedule deletion after 4 seconds
+        context.job_queue.run_once(
+            delete_message_job,
+            4,
+            data={
+                'chat_id': update.effective_chat.id,
+                'message_id': response.message_id
+            }
+        )
 
         logger.info(f"Admin status check: {who} ({user.id}) in chat {update.effective_chat.id} is admin: {is_admin}")
     except Exception as e:
@@ -297,6 +366,7 @@ async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 
+@admin_only
 async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Debug command to check all permissions for the bot in the current chat."""
     try:
@@ -375,22 +445,16 @@ async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TY
                 
                 permission_text += "\n\n**Bot Functionality Status:**\n"
                 if can_delete:
-                    permission_text += "✅ Message filtering will work\n"
-                    permission_text += "✅ Channel filtering will work\n"
-                    permission_text += "✅ Janitor mode will work"
+                    permission_text += "✅ Forward spam protection will work"
                 else:
-                    permission_text += "❌ **Message filtering will NOT work**\n"
-                    permission_text += "❌ **Channel filtering will NOT work**\n"
-                    permission_text += "❌ **Janitor mode will NOT work**\n\n"
+                    permission_text += "❌ **Forward spam protection will NOT work**\n\n"
                     permission_text += "⚠️ **Bot needs 'Delete Messages' permission to function properly!**"
                 
             elif status == "member":
                 permission_text += "👤 **BOT IS REGULAR MEMBER**\n\n"
                 permission_text += "❌ **Bot has NO admin permissions**\n"
                 permission_text += "❌ **Cannot delete messages**\n"
-                permission_text += "❌ **Message filtering will NOT work**\n"
-                permission_text += "❌ **Channel filtering will NOT work**\n"
-                permission_text += "❌ **Janitor mode will NOT work**\n\n"
+                permission_text += "❌ **Forward spam protection will NOT work**\n\n"
                 permission_text += "⚠️ **Bot needs to be promoted to administrator with 'Delete Messages' permission!**"
                 
             elif status == "restricted":
@@ -426,8 +490,9 @@ async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TY
 def register_conversation_handlers(application):
     """Register command handlers with the application."""
     # Add command handlers
-    application.add_handler(CommandHandler("enable_janitor", enable_janitor))
-    application.add_handler(CommandHandler("disable_janitor", disable_janitor))
+    # Janitor commands disabled
+    # application.add_handler(CommandHandler("enable_janitor", enable_janitor))
+    # application.add_handler(CommandHandler("disable_janitor", disable_janitor))
     application.add_handler(CommandHandler("status", show_settings))
     application.add_handler(CommandHandler("amiadmin", check_admin_status))
     application.add_handler(CommandHandler("botperms", check_all_permissions))
@@ -435,4 +500,10 @@ def register_conversation_handlers(application):
     # Message handler to enforce forward spam protection
     application.add_handler(MessageHandler(filters.FORWARDED & (~filters.StatusUpdate.ALL), handle_forward_spam))
     
-    logger.info("Settings handlers registered") 
+    logger.info("Settings handlers registered (janitor features disabled)") 
+    logger.info(
+        "Command categories: ADMIN-ONLY => ['/amiadmin','/botperms','/toggle_forward_spam']"
+    )
+    logger.info(
+        "Command categories: ACTIVE FEATURES => ['forward spam protection (message handler)']"
+    )

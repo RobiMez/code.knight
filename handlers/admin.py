@@ -1,7 +1,7 @@
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from handlers.conversation import admin_only
+from handlers.conversation import admin_only, only_target_group
 
 logger = logging.getLogger("telegram_bot")
 
@@ -19,12 +19,7 @@ def admin_required(func):
         return await func(update, context)
     return wrapper
 
-@admin_required
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send usage statistics (admin only)."""
-    await update.message.reply_text("Bot statistics: (placeholder)")
-    logger.info(f"Admin {update.effective_user.id} requested stats")
-
+@only_target_group
 @admin_only
 async def toggle_channel_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle channel filter mode for the chat."""
@@ -47,7 +42,10 @@ async def toggle_channel_filter(update: Update, context: ContextTypes.DEFAULT_TY
 
 def register_admin_handlers(application):
     """Register admin handlers with the application."""
-    application.add_handler(CommandHandler("toggle_channel_filter", toggle_channel_filter))
-    application.add_handler(CommandHandler("stats", stats))
+    # Channel filter feature disabled
+    # application.add_handler(CommandHandler("toggle_channel_filter", toggle_channel_filter))
     
-    logger.info("Admin handlers registered") 
+    logger.info("Admin handlers registered (channel filter disabled)") 
+    # logger.info(
+    #     "Command categories: ADMIN-ONLY => ['/toggle_channel_filter']"
+    # )
