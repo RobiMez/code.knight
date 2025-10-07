@@ -24,7 +24,7 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error deleting notification message: {e}")
 
 # Target group restriction
-TARGET_GROUP_USERNAME = "cmsv2"
+TARGET_GROUP_USERNAME = "codenight"
 
 
 def only_target_group(func):
