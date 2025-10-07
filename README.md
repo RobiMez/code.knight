@@ -1,6 +1,6 @@
-# Telegram Bot
+# Code knight
 
-A scalable and extensible Telegram bot built with Python.
+Modeeration bot for @codenight
 
 ## Setup
 
@@ -51,4 +51,4 @@ A scalable and extensible Telegram bot built with Python.
   - `conversation.py`: Chat settings management
   - `filters.py`: Message filtering system
 - `utils/`: Utility functions
-  - `logger.py`: Logging setup 
+  - `logger.py`: Logging setup
