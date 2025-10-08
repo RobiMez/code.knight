@@ -13,9 +13,17 @@ logger = logging.getLogger("telegram_bot")
 
 async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete a message - used for self-destructing notifications."""
+    if not context.job or not context.job.data:
+        logger.error("delete_message_job called with missing job or job.data")
+        return
+    
     job_data = context.job.data
     chat_id = job_data.get('chat_id')
     message_id = job_data.get('message_id')
+    
+    if not chat_id or not message_id:
+        logger.error(f"delete_message_job called with missing chat_id or message_id: {job_data}")
+        return
     
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -48,7 +56,9 @@ def only_target_group(func):
                     logger.error(f"Failed to resolve target group id: {e}")
             if target_id is not None and chat.id == target_id:
                 return await func(update, context, *args, **kwargs)
-            await update.message.reply_text(f"Sorry im built for @{TARGET_GROUP_USERNAME}. Go there to use me.")
+            # Only reply if we have a message to reply to
+            if update.message:
+                await update.message.reply_text(f"Sorry im built for @{TARGET_GROUP_USERNAME}. Go there to use me.")
             logger.debug(
                 f"Ignored command in non-target chat id={chat.id}, username={chat_username}"
             )
@@ -61,6 +71,10 @@ def only_target_group(func):
 async def is_user_admin(update: Update) -> bool:
     """Check if the user is an admin in the chat."""
     try:
+        if not update.effective_user or not update.effective_chat:
+            logger.error("is_user_admin called with missing effective_user or effective_chat")
+            return False
+        
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         
@@ -89,36 +103,22 @@ def admin_only(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         try:
+            if not update.effective_user or not update.effective_chat:
+                logger.error("admin_only called with missing effective_user or effective_chat")
+                return
+            
             if not await is_user_admin(update):
                 logger.warning(f"Unauthorized access attempt by user {update.effective_user.id} in chat {update.effective_chat.id}")
-                await update.message.reply_text("⚠️ This command is restricted to admins only.")
+                if update.message:
+                    await update.message.reply_text("⚠️ This command is restricted to admins only.")
                 return
             logger.info(f"Admin access granted to user {update.effective_user.id} in chat {update.effective_chat.id}")
             return await func(update, context, *args, **kwargs)
         except Exception as e:
             logger.error(f"Error in admin_only wrapper: {str(e)}")
-            await update.message.reply_text("An error occurred while checking permissions.")
+            if update.message:
+                await update.message.reply_text("An error occurred while checking permissions.")
     return wrapped
-
-
-@only_target_group
-@admin_only
-async def enable_janitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Enable the janitor feature in this chat."""
-    context.chat_data["janitorEnabled"] = True
-    
-    await update.message.reply_text("Janitor has been enabled for this chat!")
-    logger.info(f"Janitor enabled in chat {update.effective_chat.id}")
-
-
-@only_target_group
-@admin_only
-async def disable_janitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Disable the janitor feature in this chat."""
-    context.chat_data["janitorEnabled"] = False
-    
-    await update.message.reply_text("Janitor has been disabled for this chat!")
-    logger.info(f"Janitor disabled in chat {update.effective_chat.id}")
 
 
 @only_target_group
@@ -183,68 +183,131 @@ def _cleanup_fsp_cache(cache: dict) -> None:
         del cache[key]
 
 
+
 def _make_forward_key(message) -> str | None:
     """Create a stable key representing the original forwarded message.
 
-    Prefers channel forwards with original message ID. Falls back to user-based forwards.
+    Combines multiple signals for robust identification.
     Returns None if a safe key cannot be determined.
     """
-    # Channel post forwards: best signal
+    # Channel post forwards: best signal - has actual message ID
+    # Support both old API (forward_from_chat) and new API (forward_origin)
     if getattr(message, "forward_from_chat", None) and getattr(message, "forward_from_message_id", None):
         origin_chat_id = message.forward_from_chat.id
         origin_msg_id = message.forward_from_message_id
         return f"chat:{origin_chat_id}:msg:{origin_msg_id}"
+    
+    # New API: Check forward_origin for channel
+    if getattr(message, "forward_origin", None):
+        origin = message.forward_origin
+        # MessageOriginChannel
+        if hasattr(origin, "chat") and hasattr(origin, "message_id"):
+            return f"chat:{origin.chat.id}:msg:{origin.message_id}"
+        # MessageOriginUser
+        elif hasattr(origin, "sender_user"):
+            origin_user_id = origin.sender_user.id
+            key_parts = [f"user:{origin_user_id}"]
+            
+            # Add forward date as additional discriminator
+            if hasattr(origin, "date"):
+                key_parts.append(f"date:{int(origin.date.timestamp())}")
+            
+            # Add text/caption content if available
+            content = (message.text or message.caption or "").strip()
+            if content:
+                key_parts.append(f"text:{hash(content)}")
+            
+            # Add media file_unique_id for different media types
+            media_id = None
+            if getattr(message, "photo", None) and message.photo and len(message.photo) > 0:
+                media_id = f"photo:{message.photo[-1].file_unique_id}"
+            elif getattr(message, "document", None):
+                media_id = f"doc:{message.document.file_unique_id}"
+            elif getattr(message, "video", None):
+                media_id = f"video:{message.video.file_unique_id}"
+            elif getattr(message, "audio", None):
+                media_id = f"audio:{message.audio.file_unique_id}"
+            elif getattr(message, "voice", None):
+                media_id = f"voice:{message.voice.file_unique_id}"
+            elif getattr(message, "sticker", None):
+                media_id = f"sticker:{message.sticker.file_unique_id}"
+            elif getattr(message, "animation", None):
+                media_id = f"animation:{message.animation.file_unique_id}"
+            elif getattr(message, "video_note", None):
+                media_id = f"videonote:{message.video_note.file_unique_id}"
+            
+            if media_id:
+                key_parts.append(media_id)
+            
+            # Only create key if we have date and (content or media)
+            if len(key_parts) >= 2:
+                return ":".join(key_parts)
 
-    # User forwards: no original message id; use sender id and content hash
+    # Old API: User forwards
     if getattr(message, "forward_from", None):
         origin_user_id = message.forward_from.id
-        # Use text/caption as best-effort discriminator
-        content = message.text or message.caption or ""
-        content = content.strip()
+        key_parts = [f"user:{origin_user_id}"]
+        
+        # Add text/caption content if available
+        content = (message.text or message.caption or "").strip()
         if content:
-            return f"user:{origin_user_id}:hash:{hash(content)}"
-        # If no textual content, try media file_unique_id when present
-        if getattr(message, "photo", None):
-            sizes = message.photo or []
-            if sizes:
-                return f"user:{origin_user_id}:photo:{sizes[-1].file_unique_id}"
-        if getattr(message, "document", None):
-            return f"user:{origin_user_id}:doc:{message.document.file_unique_id}"
-        if getattr(message, "video", None):
-            return f"user:{origin_user_id}:video:{message.video.file_unique_id}"
-        if getattr(message, "audio", None):
-            return f"user:{origin_user_id}:audio:{message.audio.file_unique_id}"
-        if getattr(message, "voice", None):
-            return f"user:{origin_user_id}:voice:{message.voice.file_unique_id}"
+            key_parts.append(f"text:{hash(content)}")
+        
+        # Add media file_unique_id for different media types
+        media_id = None
+        if getattr(message, "photo", None) and message.photo and len(message.photo) > 0:
+            media_id = f"photo:{message.photo[-1].file_unique_id}"
+        elif getattr(message, "document", None):
+            media_id = f"doc:{message.document.file_unique_id}"
+        elif getattr(message, "video", None):
+            media_id = f"video:{message.video.file_unique_id}"
+        elif getattr(message, "audio", None):
+            media_id = f"audio:{message.audio.file_unique_id}"
+        elif getattr(message, "voice", None):
+            media_id = f"voice:{message.voice.file_unique_id}"
+        elif getattr(message, "sticker", None):
+            media_id = f"sticker:{message.sticker.file_unique_id}"
+        elif getattr(message, "animation", None):
+            media_id = f"animation:{message.animation.file_unique_id}"
+        elif getattr(message, "video_note", None):
+            media_id = f"videonote:{message.video_note.file_unique_id}"
+        
+        if media_id:
+            key_parts.append(media_id)
+        
+        # Only create key if we have content or media
+        if len(key_parts) > 1:
+            return ":".join(key_parts)
 
     # Anonymous/hidden sender name forwards or cases with no reliable key
     return None
 
 
+
 async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete forwarded messages repeated within 24 hours when protection is enabled."""
     try:
-        # Only process in target group
-        chat = update.effective_chat
-        if not chat:
-            return
-        chat_username = getattr(chat, "username", None)
-        target_id = context.application.bot_data.get("target_group_id")
-        if target_id is None and TARGET_GROUP_USERNAME:
-            try:
-                target_chat = await context.bot.get_chat(f"@{TARGET_GROUP_USERNAME}")
-                context.application.bot_data["target_group_id"] = target_chat.id
-                target_id = target_chat.id
-            except Exception:
-                target_id = None
-        if not ((chat_username and chat_username.lower() == TARGET_GROUP_USERNAME.lower()) or (target_id is not None and chat.id == target_id)):
-            return
-
         if not context.chat_data.get("forwardSpamProtectionEnabled", False):
             return
 
+        if not update.effective_message or not update.effective_chat or not update.effective_user:
+            return
+
         message = update.effective_message
-        if not message:
+        
+        # Skip if the user is an admin
+        if await is_user_admin(update):
+            logger.debug(f"FSP: Skipping forward from admin user {update.effective_user.id} in chat {update.effective_chat.id}")
+            return
+
+        # Skip automatic forwards from linked channels
+        if getattr(message, "is_automatic_forward", False) is True:
+            logger.info(f"FSP: Skipping automatic forward in chat {update.effective_chat.id}")
+            return
+
+        # Skip forwards from Telegram service (777000) - linked channel posts
+        if getattr(message, "forward_from", None) and message.forward_from.id == 777000:
+            logger.info(f"FSP: Skipping linked channel post (777000) in chat {update.effective_chat.id}")
             return
 
         # Prepare cache in chat_data
@@ -262,7 +325,7 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
             cache[key] = now
             # Optionally persist
             await context.application.update_persistence()
-            logger.debug(f"FSP: first seen key {key} in chat {update.effective_chat.id}")
+            logger.info(f"FSP: Tracking new forward key={key} in chat {update.effective_chat.id} from user {update.effective_user.id}")
             return
 
         # If seen before within 24 hours, delete this message
@@ -315,6 +378,7 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Older than 24h: reset the window to now
             cache[key] = now
             await context.application.update_persistence()
+            logger.info(f"FSP: Reset tracking for forward key={key} in chat {update.effective_chat.id} from user {update.effective_user.id} (previous: {first_seen.isoformat()})")
     except Exception as e:
         logger.error(f"Error in handle_forward_spam: {e}")
 
@@ -334,6 +398,10 @@ async def _delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Debug command to check if a user is an admin, using the best available display name."""
     try:
+        if not update.effective_user or not update.effective_chat or not update.message:
+            logger.error("check_admin_status called with missing attributes")
+            return
+        
         user = update.effective_user
         
         who = (
@@ -349,20 +417,22 @@ async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             response = await update.message.reply_text(f"❌ {who} is NOT an admin in this chat.")
 
-        # Schedule deletion after 4 seconds
-        context.job_queue.run_once(
-            delete_message_job,
-            4,
-            data={
-                'chat_id': update.effective_chat.id,
-                'message_id': response.message_id
-            }
-        )
+        # Schedule deletion after 4 seconds only if job_queue is available
+        if context.job_queue:
+            context.job_queue.run_once(
+                delete_message_job,
+                4,
+                data={
+                    'chat_id': update.effective_chat.id,
+                    'message_id': response.message_id
+                }
+            )
 
         logger.info(f"Admin status check: {who} ({user.id}) in chat {update.effective_chat.id} is admin: {is_admin}")
     except Exception as e:
         logger.error(f"Error checking admin status: {e}")
-        await update.message.reply_text("Error checking admin status.")
+        if update.message:
+            await update.message.reply_text("Error checking admin status.")
 
 
 
@@ -370,6 +440,10 @@ async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Debug command to check all permissions for the bot in the current chat."""
     try:
+        if not update.effective_chat or not update.message:
+            logger.error("check_all_permissions called with missing attributes")
+            return
+        
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
         bot_id = context.bot.id
@@ -484,7 +558,8 @@ async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TY
             
     except Exception as e:
         logger.error(f"Error in check_all_permissions: {str(e)}")
-        await update.message.reply_text("❌ Error checking bot permissions.")
+        if update.message:
+            await update.message.reply_text("❌ Error checking bot permissions.")
 
 
 def register_conversation_handlers(application):
