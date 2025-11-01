@@ -1,150 +1,134 @@
 import logging
+import sys
+import time
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 from telegram.constants import ParseMode
-import os
+from handlers.decorators import self_destruct
 
 logger = logging.getLogger("telegram_bot")
 
 
-ADMIN_USER_IDS = [352475318]
+from handlers.decorators import ADMIN_USER_IDS
+
+# Throttling constants
+LAST_ACTIVITY_UPDATE_INTERVAL = 60  # Update last_activity every 60 seconds
+MEMBER_COUNT_UPDATE_INTERVAL = 300  # Update member count every 5 minutes (300 seconds)
 
 def is_admin(user_id):
     """Check if a user is authorized to use admin commands."""
     return user_id in ADMIN_USER_IDS
 
 async def track_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Track chats the bot is added to."""
+    """Track chats the bot is added to with throttled updates."""
     chat = update.effective_chat
+    
+    if not chat:
+        return
     
     # Initialize bot_data structure if not exists
     if "tracked_chats" not in context.bot_data:
         context.bot_data["tracked_chats"] = {}
     
-    # Get member count safely
-    member_count = "Unknown"
-    try:
-        # Only get member count for groups and supergroups
-        if chat.type in ["group", "supergroup"]:
-            # get_member_count() is a method that returns a coroutine
-            # We need to await it to get the actual count
-            member_count = await context.bot.get_chat_member_count(chat.id)
-    except Exception as e:
-        logger.error(f"Error getting member count for chat {chat.id}: {e}")
+    now = datetime.now()
+    chat_id = chat.id
     
-    # Store or update chat info with only serializable data
-    context.bot_data["tracked_chats"][chat.id] = {
-        "chat_id": chat.id,
-        "title": chat.title or (f"Private chat with {update.effective_user.first_name}" if chat.type == "private" else "Unknown"),
+    # Check if chat is already tracked
+    existing_chat = context.bot_data["tracked_chats"].get(chat_id)
+    
+    # Determine if we need to update last_activity (throttled)
+    should_update_activity = False
+    if not existing_chat:
+        should_update_activity = True
+    else:
+        last_activity_str = existing_chat.get("last_activity")
+        if last_activity_str:
+            try:
+                last_activity = datetime.fromisoformat(last_activity_str)
+                time_since_last = (now - last_activity).total_seconds()
+                if time_since_last >= LAST_ACTIVITY_UPDATE_INTERVAL:
+                    should_update_activity = True
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Could not parse last_activity for chat {chat_id}: {e}")
+                should_update_activity = True
+        else:
+            should_update_activity = True
+    
+    # Determine if we need to update member count (throttled, only for groups/supergroups)
+    should_update_member_count = False
+    member_count = existing_chat.get("members", "Unknown") if existing_chat else "Unknown"
+    
+    if chat.type in ["group", "supergroup"]:
+        if not existing_chat or existing_chat.get("members") == "Unknown":
+            should_update_member_count = True
+        else:
+            last_member_update_str = existing_chat.get("last_member_count_update")
+            if last_member_update_str:
+                try:
+                    last_member_update = datetime.fromisoformat(last_member_update_str)
+                    time_since_last_update = (now - last_member_update).total_seconds()
+                    if time_since_last_update >= MEMBER_COUNT_UPDATE_INTERVAL:
+                        should_update_member_count = True
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Could not parse last_member_count_update for chat {chat_id}: {e}")
+                    should_update_member_count = True
+            else:
+                should_update_member_count = True
+    
+    # Update member count if needed
+    if should_update_member_count and chat.type in ["group", "supergroup"]:
+        try:
+            member_count = await context.bot.get_chat_member_count(chat.id)
+        except Exception as e:
+            # Log as warning for expected failures (private chats, permission issues)
+            # Only log as error for unexpected failures
+            if chat.type in ["group", "supergroup"]:
+                logger.warning(f"Could not get member count for chat {chat.id} (may not have permission): {e}")
+            else:
+                logger.debug(f"Member count not available for chat type {chat.type}: {e}")
+            # Keep existing member count or use "Unknown"
+            member_count = existing_chat.get("members", "Unknown") if existing_chat else "Unknown"
+    
+    # Build chat info dict
+    chat_info = {
+        "chat_id": chat_id,
+        "title": chat.title or (f"Private chat with {update.effective_user.first_name}" if chat.type == "private" and update.effective_user else "Unknown"),
         "type": chat.type,
-        "members": member_count,
         "username": chat.username,
-        "last_activity": datetime.now().isoformat(),
     }
     
-    # Don't force persistence update on every message
-    # Let the application handle persistence based on its schedule
-    # await context.application.update_persistence()  # Removed this line
+    # Update fields conditionally
+    if should_update_activity:
+        chat_info["last_activity"] = now.isoformat()
+    elif existing_chat and "last_activity" in existing_chat:
+        chat_info["last_activity"] = existing_chat["last_activity"]
+    
+    if should_update_member_count or not existing_chat:
+        chat_info["members"] = member_count
+        if chat.type in ["group", "supergroup"]:
+            chat_info["last_member_count_update"] = now.isoformat()
+    elif existing_chat:
+        chat_info["members"] = existing_chat.get("members", "Unknown")
+        if "last_member_count_update" in existing_chat:
+            chat_info["last_member_count_update"] = existing_chat["last_member_count_update"]
+    
+    # Store or update chat info
+    context.bot_data["tracked_chats"][chat_id] = chat_info
 
-async def admin_list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List all groups the bot is in (admin only)."""
-    user_id = update.effective_user.id
-    
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
-        logger.warning(f"Unauthorized access attempt to admin command by user {user_id}")
-        return
-    
-    if "tracked_chats" not in context.bot_data or not context.bot_data["tracked_chats"]:
-        await update.message.reply_text("No tracked chats available.")
-        return
-    
-    groups = [
-        chat for chat_id, chat in context.bot_data["tracked_chats"].items() 
-        if chat.get("type") in ["group", "supergroup"]
-    ]
-    
-    if not groups:
-        await update.message.reply_text("Bot is not in any groups.")
-        return
-    
-    # Prepare a formatted list of groups
-    groups_text = "\n\n".join([
-        f"*{i+1}. {g['title']}*\n"
-        f"ID: `{g['chat_id']}`\n"
-        f"Type: {g['type']}\n"
-        f"Username: {g.get('username', 'None')}\n"
-        f"Last activity: {g.get('last_activity', 'Unknown')}"
-        for i, g in enumerate(groups)
-    ])
-    
-    await update.message.reply_text(
-        f"🤖 *Bot is in {len(groups)} groups:*\n\n{groups_text}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    logger.info(f"Admin {user_id} requested group list")
 
-async def admin_group_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show filters configured for a specific group (admin only)."""
-    user_id = update.effective_user.id
-    
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
-        logger.warning(f"Unauthorized access attempt to admin command by user {user_id}")
-        return
-    
-    # Get group ID from command arguments
-    if not context.args or len(context.args) < 1:
-        await update.message.reply_text(
-            "Please provide a group ID or use /admin_list_groups to see available groups."
-        )
-        return
-    
-    try:
-        group_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Invalid group ID. Use /admin_list_groups to see available groups.")
-        return
-    
-    # Get the group data from persistent storage
-    chat_data = context.application.chat_data.get(group_id)
-    
-    if not chat_data:
-        await update.message.reply_text(f"No data found for group ID {group_id}")
-        return
-    
-    # Get filter patterns for this group
-    filter_patterns = chat_data.get("filter_patterns", [])
-    
-    if not filter_patterns:
-        await update.message.reply_text(f"No filter patterns configured for group ID {group_id}")
-        return
-    
-    # Convert to list if it's a set
-    if isinstance(filter_patterns, set):
-        filter_patterns = list(filter_patterns)
-    
-    # Format the filter patterns
-    patterns_text = "\n".join([f"{i+1}. `{pattern}`" for i, pattern in enumerate(filter_patterns)])
-    
-    # Get group name from tracked chats if available
-    group_name = "Unknown Group"
-    if "tracked_chats" in context.bot_data and group_id in context.bot_data["tracked_chats"]:
-        group_name = context.bot_data["tracked_chats"][group_id].get("title", "Unknown Group")
-    
-    await update.message.reply_text(
-        f"*Filters for {group_name} (ID: {group_id}):*\n\n{patterns_text}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    logger.info(f"Admin {user_id} requested filters for group {group_id}")
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show bot statistics and diagnostics (admin only)."""
     user_id = update.effective_user.id
     
     if not is_admin(user_id):
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        from handlers.decorators import send_self_destructing_message
+        await send_self_destructing_message(
+            chat_id=update.effective_chat.id,
+            text="⛔ You are not authorized to use this command.",
+            context=context,
+            seconds=5
+        )
         logger.warning(f"Unauthorized access attempt to admin command by user {user_id}")
         return
     
@@ -154,7 +138,6 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     groups = 0
     supergroups = 0
     channels = 0
-    total_filters = 0
     
     if "tracked_chats" in context.bot_data:
         for chat_id, chat in context.bot_data["tracked_chats"].items():
@@ -230,14 +213,125 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     logger.info(f"Admin {user_id} requested bot statistics")
 
+@self_destruct(seconds=10)
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show cache statistics, ping, and deletion count (admin only)."""
+    try:
+        if not update.effective_user or not update.message:
+            logger.error("admin_cache_stats called with missing effective_user or message")
+            return
+        
+        user_id = update.effective_user.id
+        
+        if not is_admin(user_id):
+            from handlers.decorators import send_self_destructing_message
+            await send_self_destructing_message(
+                chat_id=update.effective_chat.id,
+                text="⛔ You are not authorized to use this command.",
+                context=context,
+                seconds=5
+            )
+            logger.warning(f"Unauthorized access attempt to admin command by user {user_id}")
+            return
+        
+        # Get cache from chat_data (only one chat)
+        cache_entries = 0
+        cache_size_bytes = 0
+        cache = None
+        
+        # Find the cache in chat_data
+        for chat_id, chat_data in context.application.chat_data.items():
+            if isinstance(chat_data, dict) and "fsp_cache" in chat_data:
+                cache = chat_data["fsp_cache"]
+                if isinstance(cache, dict):
+                    cache_entries = len(cache)
+                    # Calculate approximate cache size: sum of key sizes + datetime sizes
+                    total_size = sys.getsizeof(cache)  # Base dict overhead
+                    for key, value in cache.items():
+                        total_size += sys.getsizeof(key)  # String key
+                        total_size += sys.getsizeof(value)  # Datetime value
+                    cache_size_bytes = total_size
+                    break  # Only one chat
+        
+        # Measure cache read time directly (average of multiple reads)
+        cache_read_time = None
+        if cache and cache_entries > 0:
+            # Measure multiple cache reads and average for accuracy
+            cache_keys = list(cache.keys())
+            num_samples = min(10, len(cache_keys))  # Sample up to 10 reads
+            total_read_time = 0
+            
+            for i in range(num_samples):
+                cache_read_start = time.time()
+                _ = cache.get(cache_keys[i % len(cache_keys)])
+                total_read_time += (time.time() - cache_read_start) * 1000  # Convert to milliseconds
+            
+            cache_read_time = total_read_time / num_samples
+        
+        # Measure API ping (Telegram API response time)
+        api_ping_start = time.time()
+        try:
+            await context.bot.get_me()
+            api_ping_time = (time.time() - api_ping_start) * 1000  # Convert to milliseconds
+        except Exception as e:
+            logger.error(f"Error measuring API ping: {e}")
+            api_ping_time = None
+        
+        # Get pending updates count
+        pending_updates = 0
+        try:
+            # Check if application has an update_queue attribute
+            if hasattr(context.application, 'update_queue'):
+                update_queue = context.application.update_queue
+                if hasattr(update_queue, 'qsize'):
+                    pending_updates = update_queue.qsize()
+                elif hasattr(update_queue, '_queue'):
+                    # Fallback for different queue implementations
+                    pending_updates = len(update_queue._queue) if hasattr(update_queue._queue, '__len__') else 0
+        except Exception as e:
+            logger.debug(f"Could not get pending updates count: {e}")
+        
+        # Format the stats response
+        stats_text = f"*Entries:* {cache_entries}\n"
+        stats_text += f"*Size:* {cache_size_bytes} bytes\n"
+        
+        if cache_read_time is not None:
+            stats_text += f"*Read time:* {cache_read_time:.3f}ms\n"
+        else:
+            stats_text += f"*Read time:* N/A (cache empty)\n"
+        
+        if api_ping_time is not None:
+            stats_text += f"*Ping:* {api_ping_time:.2f}ms\n"
+        else:
+            stats_text += f"*Ping:* Error\n"
+        
+        stats_text += f"*Pending updates:* {pending_updates}\n"
+        
+        response = await update.message.reply_text(
+            stats_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        logger.info(f"Admin {user_id} requested cache statistics")
+        return response
+    except Exception as e:
+        logger.error(f"Error in admin_cache_stats: {e}", exc_info=True)
+        if update.message:
+            try:
+                from handlers.decorators import send_self_destructing_message
+                await send_self_destructing_message(
+                    chat_id=update.effective_chat.id,
+                    text="❌ An error occurred while processing the ping command.",
+                    context=context,
+                    seconds=5
+                )
+            except:
+                pass
+
 def register_diagnostic_handlers(application):
     """Register diagnostic handlers with the application."""
     # Admin commands
-    application.add_handler(CommandHandler("admin_list_groups", admin_list_groups))
-    application.add_handler(CommandHandler("admin_group_filters", admin_group_filters))
-    application.add_handler(CommandHandler("admin_stats", admin_stats))
+    application.add_handler(CommandHandler("ping", ping))
+
+    application.add_handler(CommandHandler("stats", stats))
     
     logger.info("Diagnostic handlers registered")
-
-    # Note: track_chat is not a command, it should be called from other handlers
-    # like message handlers or chat_member handlers 

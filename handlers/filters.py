@@ -10,7 +10,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import BadRequest
-from handlers.conversation import admin_only, only_target_group
+from handlers.decorators import admin_only, only_target_group, send_self_destructing_message
 
 logger = logging.getLogger("telegram_bot")
 
@@ -167,19 +167,20 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info("---")
 
     # Only process in target group
+    from handlers.decorators import TARGET_GROUP_USERNAME
     chat = update.effective_chat
     if not chat:
         return
     chat_username = getattr(chat, "username", None)
     target_id = context.application.bot_data.get("target_group_id")
-    if target_id is None:
+    if target_id is None and TARGET_GROUP_USERNAME:
         try:
-            target_chat = await context.bot.get_chat("@codenight")
+            target_chat = await context.bot.get_chat(f"@{TARGET_GROUP_USERNAME}")
             context.application.bot_data["target_group_id"] = target_chat.id
             target_id = target_chat.id
         except Exception:
             target_id = None
-    if not ((chat_username and chat_username.lower() == "codenight") or (target_id is not None and chat.id == target_id)):
+    if not ((chat_username and chat_username.lower() == TARGET_GROUP_USERNAME.lower()) or (target_id is not None and chat.id == target_id)):
         return
 
     # Check channel filter first - delete messages from external channels if enabled
@@ -205,19 +206,11 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.delete()
             
             # Send notification that will self-destruct
-            notification = await update.effective_chat.send_message(
-                f"🚫 Deleted a message from channel: {channel_name}",
-                parse_mode=ParseMode.HTML
-            )
-            
-            # Schedule deletion of our notification after 30 seconds
-            context.job_queue.run_once(
-                delete_message_job,
-                30,
-                data={
-                    'chat_id': update.effective_chat.id,
-                    'message_id': notification.message_id
-                }
+            await send_self_destructing_message(
+                chat_id=update.effective_chat.id,
+                text=f"🚫 Deleted a message from channel: {channel_name}",
+                context=context,
+                seconds=30
             )
             
             logger.info(f"Deleted channel message from {channel_name} in chat {update.effective_chat.id}")
@@ -260,19 +253,11 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await update.message.delete()
                     
                     # Send notification that will self-destruct
-                    notification = await update.effective_chat.send_message(
-                        f"Deleted a message from {username} \nMatched filter pattern: `{pattern}`",
-                        parse_mode=ParseMode.HTML
-                    )
-                    
-                    # Schedule deletion of our notification after 30 seconds
-                    context.job_queue.run_once(
-                        delete_message_job,
-                        30,
-                        data={
-                            'chat_id': update.effective_chat.id,
-                            'message_id': notification.message_id
-                        }
+                    await send_self_destructing_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"Deleted a message from {username} \nMatched filter pattern: `{pattern}`",
+                        context=context,
+                        seconds=30
                     )
                     
                     logger.info(
@@ -291,17 +276,6 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error(f"Error matching pattern '{pattern}': {e}")
 
 
-async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete a message - used for self-destructing notifications."""
-    job_data = context.job.data
-    chat_id = job_data.get('chat_id')
-    message_id = job_data.get('message_id')
-    
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.debug(f"Deleted notification message {message_id} in chat {chat_id}")
-    except Exception as e:
-        logger.error(f"Error deleting notification message: {e}")
 
 
 @only_target_group

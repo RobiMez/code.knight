@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 
 # Import handlers
 from handlers.basic import register_basic_handlers
-from handlers.admin import register_admin_handlers
 from handlers.conversation import register_conversation_handlers
 from handlers.filters import register_filter_handlers
 from handlers.diagnostics import register_diagnostic_handlers, track_chat
@@ -49,13 +48,12 @@ def main() -> None:
     
     # Register handlers
     register_basic_handlers(application)
-    register_admin_handlers(application)
     register_conversation_handlers(application)
     register_filter_handlers(application)
     register_diagnostic_handlers(application)
     # Add a chat update handler to track groups
     application.add_handler(
-        MessageHandler(filters.ALL, track_chat_activity),
+        MessageHandler(filters.ALL & (~filters.COMMAND), track_chat_activity),
         group=999  # High group number to run after other handlers
     )
     

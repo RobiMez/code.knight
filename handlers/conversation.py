@@ -1,4 +1,5 @@
 import logging
+import time
 from telegram import Update
 from telegram.ext import (
     CommandHandler,
@@ -6,119 +7,18 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from functools import wraps
 from datetime import datetime, timedelta, timezone
+from handlers.decorators import (
+    only_target_group,
+    admin_only,
+    is_user_admin,
+    self_destruct,
+    send_self_destructing_message,
+    GROUP_ANONYMOUS_BOT_ID,
+    TELEGRAM_SERVICE_USER_ID,
+)
 
 logger = logging.getLogger("telegram_bot")
-
-async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete a message - used for self-destructing notifications."""
-    if not context.job or not context.job.data:
-        logger.error("delete_message_job called with missing job or job.data")
-        return
-    
-    job_data = context.job.data
-    chat_id = job_data.get('chat_id')
-    message_id = job_data.get('message_id')
-    
-    if not chat_id or not message_id:
-        logger.error(f"delete_message_job called with missing chat_id or message_id: {job_data}")
-        return
-    
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.debug(f"Deleted notification message {message_id} in chat {chat_id}")
-    except Exception as e:
-        logger.error(f"Error deleting notification message: {e}")
-
-# Target group restriction
-TARGET_GROUP_USERNAME = "codenight"
-
-
-def only_target_group(func):
-    """Decorator: allow execution only in the target group @codenight."""
-    @wraps(func)
-    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        try:
-            chat = update.effective_chat
-            if not chat:
-                return
-            chat_username = getattr(chat, "username", None)
-            if chat_username and chat_username.lower() == TARGET_GROUP_USERNAME.lower():
-                return await func(update, context, *args, **kwargs)
-            target_id = context.application.bot_data.get("target_group_id")
-            if target_id is None and TARGET_GROUP_USERNAME:
-                try:
-                    target_chat = await context.bot.get_chat(f"@{TARGET_GROUP_USERNAME}")
-                    context.application.bot_data["target_group_id"] = target_chat.id
-                    target_id = target_chat.id
-                except Exception as e:
-                    logger.error(f"Failed to resolve target group id: {e}")
-            if target_id is not None and chat.id == target_id:
-                return await func(update, context, *args, **kwargs)
-            # Only reply if we have a message to reply to
-            if update.message:
-                await update.message.reply_text(f"Sorry im built for @{TARGET_GROUP_USERNAME}. Go there to use me.")
-            logger.debug(
-                f"Ignored command in non-target chat id={chat.id}, username={chat_username}"
-            )
-            return
-        except Exception as e:
-            logger.error(f"Error in only_target_group wrapper: {e}")
-            return
-    return wrapped
-
-async def is_user_admin(update: Update) -> bool:
-    """Check if the user is an admin in the chat."""
-    try:
-        if not update.effective_user or not update.effective_chat:
-            logger.error("is_user_admin called with missing effective_user or effective_chat")
-            return False
-        
-        user_id = update.effective_user.id
-        chat_id = update.effective_chat.id
-        
-        # For private chats, consider the user as admin
-        if update.effective_chat.type == "private":
-            logger.debug(f"User {user_id} automatically admin in private chat")
-            return True
-            
-        # Get chat administrators
-        chat_admins = await update.effective_chat.get_administrators()
-        admin_ids = [admin.user.id for admin in chat_admins]
-        
-        is_admin = user_id in admin_ids
-        logger.debug(f"Admin check for user {user_id} in chat {chat_id}: {is_admin}")
-        logger.debug(f"Admin IDs in chat: {admin_ids}")
-        
-        return is_admin
-    except Exception as e:
-        logger.error(f"Error checking admin status: {str(e)}")
-        # Default to not admin if there's an error
-        return False
-
-
-def admin_only(func):
-    """Decorator to restrict commands to admins only."""
-    @wraps(func)
-    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        try:
-            if not update.effective_user or not update.effective_chat:
-                logger.error("admin_only called with missing effective_user or effective_chat")
-                return
-            
-            if not await is_user_admin(update):
-                logger.warning(f"Unauthorized access attempt by user {update.effective_user.id} in chat {update.effective_chat.id}")
-                if update.message:
-                    await update.message.reply_text("⚠️ This command is restricted to admins only.")
-                return
-            logger.info(f"Admin access granted to user {update.effective_user.id} in chat {update.effective_chat.id}")
-            return await func(update, context, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in admin_only wrapper: {str(e)}")
-            if update.message:
-                await update.message.reply_text("An error occurred while checking permissions.")
-    return wrapped
 
 
 @only_target_group
@@ -127,6 +27,8 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # janitor_status = context.chat_data.get("janitorEnabled", False)  # DISABLED
     # channel_filter_status = context.chat_data.get("channelFilterEnabled", False)  # DISABLED
     fsp_status = context.chat_data.get("forwardSpamProtectionEnabled", False)
+    lmp_status = context.chat_data.get("longMessageProtectionEnabled", False)
+    lmp_limit = context.chat_data.get("longMessageLimit", 400)
     
     # Count filter patterns - DISABLED since filters are disabled
     # filter_count = 0
@@ -136,14 +38,18 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # janitor_text = "enabled" if janitor_status else "disabled"  # DISABLED
     # channel_filter_text = "enabled" if channel_filter_status else "disabled"  # DISABLED
     fsp_text = "enabled" if fsp_status else "disabled"
+    lmp_text = "enabled" if lmp_status else "disabled"
     
     status_text = f"""
 *Current settings for this chat:*
 
 🔁 *Forward Spam Protection:* {fsp_text}
+📝 *Long Message Protection:* {lmp_text} (limit: {lmp_limit} chars)
 
 *Available Commands:*
-• `/toggle_forward_spam` - Toggle forward spam protection (delete repeated forwards within 24h)
+• `/forward_spam` - Toggle forward spam protection (delete repeated forwards within 24h)
+• `/message_cap` - Toggle long message protection (delete messages above character limit)
+• `/set_message_cap <number>` - Set character limit for long message protection (default: 400)
     """
     
     await update.message.reply_text(status_text, parse_mode="Markdown")
@@ -152,6 +58,7 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @only_target_group
 @admin_only
+@self_destruct(seconds=10)
 async def toggle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle forward spam protection for the chat."""
     current_state = context.chat_data.get("forwardSpamProtectionEnabled", False)
@@ -164,7 +71,7 @@ async def toggle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
     status = "enabled" if new_state else "disabled"
     emoji = "✅" if new_state else "❌"
 
-    await update.message.reply_text(
+    response = await update.message.reply_text(
         f"{emoji} Forward spam protection has been {status}.\n\n"
         f"When enabled, any specific forwarded message repeated within 24 hours will be deleted."
     )
@@ -172,6 +79,71 @@ async def toggle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(
         f"Forward spam protection {status} in chat {update.effective_chat.id} by user {update.effective_user.id}"
     )
+    return response
+
+
+@only_target_group
+@admin_only
+@self_destruct(seconds=10)
+async def toggle_long_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle long message protection for the chat."""
+    current_state = context.chat_data.get("longMessageProtectionEnabled", False)
+    new_state = not current_state
+    context.chat_data["longMessageProtectionEnabled"] = new_state
+    limit = context.chat_data.get("longMessageLimit", 400)
+
+    # Ensure data is marked for persistence
+    await context.application.update_persistence()
+
+    status = "enabled" if new_state else "disabled"
+    emoji = "✅" if new_state else "❌"
+
+    response = await update.message.reply_text(
+        f"{emoji} Long message protection has been {status}.\n\n"
+        f"When enabled, any message with text/caption above {limit} characters will be deleted."
+    )
+
+    logger.info(
+        f"Long message protection {status} in chat {update.effective_chat.id} by user {update.effective_user.id}"
+    )
+    return response
+
+
+@only_target_group
+@admin_only
+@self_destruct(seconds=10)
+async def set_long_message_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set the character limit for long message protection."""
+    if not context.args or len(context.args) < 1:
+        current_limit = context.chat_data.get("longMessageLimit", 400)
+        response = await update.message.reply_text(
+            f"Current long message limit: {current_limit} characters.\n\n"
+            f"Usage: /setmessagecap <number>\n"
+            f"Example: /setmessagecap 500"
+        )
+        return response
+    
+    try:
+        new_limit = int(context.args[0])
+        if new_limit < 1:
+            response = await update.message.reply_text("❌ Limit must be at least 1 character.")
+            return response
+        
+        context.chat_data["longMessageLimit"] = new_limit
+        await context.application.update_persistence()
+        
+        response = await update.message.reply_text(
+            f"✅ Long message limit set to {new_limit} characters.\n\n"
+            f"Messages with text/caption above this limit will be deleted when protection is enabled."
+        )
+        
+        logger.info(
+            f"Long message limit set to {new_limit} in chat {update.effective_chat.id} by user {update.effective_user.id}"
+        )
+        return response
+    except ValueError:
+        response = await update.message.reply_text("❌ Invalid number. Please provide a valid integer.")
+        return response
 
 
 def _cleanup_fsp_cache(cache: dict) -> None:
@@ -181,7 +153,6 @@ def _cleanup_fsp_cache(cache: dict) -> None:
     stale_keys = [key for key, first_seen in cache.items() if first_seen < cutoff]
     for key in stale_keys:
         del cache[key]
-
 
 
 def _make_forward_key(message) -> str | None:
@@ -283,6 +254,33 @@ def _make_forward_key(message) -> str | None:
     return None
 
 
+async def should_skip_message_protection(update: Update, message) -> bool:
+    """Check if a message should be skipped by protection handlers.
+    
+    Returns True if the message should be excluded from protection (admin, linked channel, etc.)
+    """
+    # Skip if the user is an admin
+    if await is_user_admin(update):
+        return True
+    
+    # Skip messages from GroupAnonymousBot
+    if update.effective_user.id == GROUP_ANONYMOUS_BOT_ID:
+        return True
+    
+    # Skip automatic forwards from linked channels
+    if getattr(message, "is_automatic_forward", False) is True:
+        return True
+    
+    # Skip forwards from Telegram service (777000) - linked channel posts
+    if getattr(message, "forward_from", None) and message.forward_from.id == TELEGRAM_SERVICE_USER_ID:
+        return True
+    
+    # Skip messages directly from Telegram service (777000) - linked channel posts
+    if update.effective_user.id == TELEGRAM_SERVICE_USER_ID:
+        return True
+    
+    return False
+
 
 async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete forwarded messages repeated within 24 hours when protection is enabled."""
@@ -295,19 +293,9 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         message = update.effective_message
         
-        # Skip if the user is an admin
-        if await is_user_admin(update):
-            logger.debug(f"FSP: Skipping forward from admin user {update.effective_user.id} in chat {update.effective_chat.id}")
-            return
-
-        # Skip automatic forwards from linked channels
-        if getattr(message, "is_automatic_forward", False) is True:
-            logger.info(f"FSP: Skipping automatic forward in chat {update.effective_chat.id}")
-            return
-
-        # Skip forwards from Telegram service (777000) - linked channel posts
-        if getattr(message, "forward_from", None) and message.forward_from.id == 777000:
-            logger.info(f"FSP: Skipping linked channel post (777000) in chat {update.effective_chat.id}")
+        # Check if message should be skipped (admin, linked channel, etc.)
+        if await should_skip_message_protection(update, message):
+            logger.debug(f"FSP: Skipping forward from user {update.effective_user.id} in chat {update.effective_chat.id}")
             return
 
         # Prepare cache in chat_data
@@ -318,8 +306,14 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
         if key is None:
             return  # Cannot safely identify origin; skip
 
+        # Measure cache read time
+        cache_read_start = time.time()
         now = datetime.now(timezone.utc)
         first_seen: datetime | None = cache.get(key)
+        cache_read_time = (time.time() - cache_read_start) * 1000  # Convert to milliseconds
+        
+        # Track cache read performance (store last read time)
+        context.bot_data["last_cache_read_time_ms"] = cache_read_time
 
         if first_seen is None:
             cache[key] = now
@@ -338,6 +332,11 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"delta_seconds={int(delta.total_seconds())}"
                 )
                 await message.delete()
+                
+                # Increment total deleted messages counter
+                total_deleted = context.bot_data.setdefault("total_deleted_messages", 0)
+                context.bot_data["total_deleted_messages"] = total_deleted + 1
+                
                 logger.info(
                     f"FSP: Deleted repeated forward key {key} in chat {update.effective_chat.id}"
                 )
@@ -361,17 +360,13 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
                     parts.append(f"{minutes}m")
                 parts.append(f"{seconds}s")
                 remaining_str = " ".join(parts)
-                notice = await update.effective_chat.send_message(
-                    f"🧹 Removed repeated forwarded message from {who} (within 24h). "
-                    f"Try again in {remaining_str}."
+                await send_self_destructing_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"🧹 Removed repeated forwarded message from {who} (within 24h). "
+                         f"Try again in {remaining_str}.",
+                    context=context,
+                    seconds=6
                 )
-
-                if context.job_queue:
-                    context.job_queue.run_once(
-                        _delete_message_job,
-                        when=6,
-                        data={"chat_id": notice.chat_id, "message_id": notice.message_id},
-                    )
             except Exception as del_err:
                 logger.error(f"FSP: Failed to delete message: {del_err}")
         else:
@@ -383,18 +378,70 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error in handle_forward_spam: {e}")
 
 
-async def _delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """JobQueue task to delete a specific message (bot's notice)."""
+async def handle_long_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete messages with text/caption above the character limit when protection is enabled."""
     try:
-        job = context.job  # type: ignore[attr-defined]
-        data = getattr(job, "data", {}) or {}
-        chat_id = data.get("chat_id")
-        message_id = data.get("message_id")
-        if chat_id and message_id:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        logger.error(f"FSP: Failed to auto-delete notice message: {e}")
+        if not context.chat_data.get("longMessageProtectionEnabled", False):
+            return
 
+        if not update.effective_message or not update.effective_chat or not update.effective_user:
+            return
+
+        message = update.effective_message
+        
+        # Check if message should be skipped (admin, linked channel, etc.)
+        if await should_skip_message_protection(update, message):
+            logger.debug(f"LMP: Skipping long message from user {update.effective_user.id} in chat {update.effective_chat.id}")
+            return
+
+        # Get text or caption
+        text = message.text or message.caption or ""
+        text_length = len(text)
+        
+        # Skip if no text or below limit
+        if text_length == 0:
+            return
+        
+        limit = context.chat_data.get("longMessageLimit", 400)
+        
+        if text_length <= limit:
+            return
+        
+        # Message exceeds limit, delete it
+        try:
+            logger.info(
+                f"LMP trigger: user={update.effective_user.id} chat={update.effective_chat.id} "
+                f"text_length={text_length} limit={limit}"
+            )
+            await message.delete()
+            
+            # Increment total deleted messages counter
+            total_deleted = context.bot_data.setdefault("total_deleted_messages", 0)
+            context.bot_data["total_deleted_messages"] = total_deleted + 1
+            
+            logger.info(
+                f"LMP: Deleted long message ({text_length} chars, limit: {limit}) in chat {update.effective_chat.id}"
+            )
+
+            # Notify and auto-delete the notice after 6 seconds
+            user = update.effective_user
+            who = (
+                f"@{user.username}" if getattr(user, "username", None) else str(user.id)
+            )
+            await send_self_destructing_message(
+                chat_id=update.effective_chat.id,
+                text=f"🧹 Removed message from {who} (exceeded {limit} character limit: {text_length} chars).",
+                context=context,
+                seconds=6
+            )
+        except Exception as del_err:
+            logger.error(f"LMP: Failed to delete message: {del_err}")
+    except Exception as e:
+        logger.error(f"Error in handle_long_message: {e}")
+
+
+@only_target_group
+@self_destruct(seconds=4)
 async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Debug command to check if a user is an admin, using the best available display name."""
     try:
@@ -417,26 +464,22 @@ async def check_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             response = await update.message.reply_text(f"❌ {who} is NOT an admin in this chat.")
 
-        # Schedule deletion after 4 seconds only if job_queue is available
-        if context.job_queue:
-            context.job_queue.run_once(
-                delete_message_job,
-                4,
-                data={
-                    'chat_id': update.effective_chat.id,
-                    'message_id': response.message_id
-                }
-            )
-
         logger.info(f"Admin status check: {who} ({user.id}) in chat {update.effective_chat.id} is admin: {is_admin}")
+        return response
     except Exception as e:
         logger.error(f"Error checking admin status: {e}")
-        if update.message:
-            await update.message.reply_text("Error checking admin status.")
+        if update.message and context.job_queue:
+            await send_self_destructing_message(
+                chat_id=update.effective_chat.id,
+                text="Error checking admin status.",
+                context=context,
+                seconds=5
+            )
 
 
 
 @admin_only
+@self_destruct(seconds=15)
 async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Debug command to check all permissions for the bot in the current chat."""
     try:
@@ -450,13 +493,13 @@ async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TY
         
         # For private chats, bot has all permissions
         if chat_type == "private":
-            await update.message.reply_text(
+            response = await update.message.reply_text(
                 "✅ *Private Chat - Bot has all permissions*\n\n"
                 "In private chats, the bot can perform all actions.",
                 parse_mode="Markdown"
             )
             logger.info(f"Bot permission check: Bot {bot_id} in private chat - all permissions granted")
-            return
+            return response
         
         # Get bot's member info in the chat
         try:
@@ -544,22 +587,25 @@ async def check_all_permissions(update: Update, context: ContextTypes.DEFAULT_TY
                 permission_text += "🚫 **BOT IS BANNED**\n\n"
                 permission_text += "❌ **Bot has been kicked from this chat**"
             
-            await update.message.reply_text(permission_text, parse_mode="Markdown")
+            response = await update.message.reply_text(permission_text, parse_mode="Markdown")
             logger.info(f"Bot permission check completed for chat {chat_id}: status={status}")
+            return response
             
         except Exception as member_error:
             logger.error(f"Error getting bot member info: {member_error}")
-            await update.message.reply_text(
+            response = await update.message.reply_text(
                 f"❌ **Error checking bot permissions**\n\n"
                 f"Could not retrieve bot member information.\n"
                 f"Error: {str(member_error)}",
                 parse_mode="Markdown"
             )
+            return response
             
     except Exception as e:
         logger.error(f"Error in check_all_permissions: {str(e)}")
         if update.message:
-            await update.message.reply_text("❌ Error checking bot permissions.")
+            response = await update.message.reply_text("❌ Error checking bot permissions.")
+            return response
 
 
 def register_conversation_handlers(application):
@@ -571,14 +617,18 @@ def register_conversation_handlers(application):
     application.add_handler(CommandHandler("status", show_settings))
     application.add_handler(CommandHandler("amiadmin", check_admin_status))
     application.add_handler(CommandHandler("botperms", check_all_permissions))
-    application.add_handler(CommandHandler("toggle_forward_spam", toggle_forward_spam))
+    application.add_handler(CommandHandler("forwardspam", toggle_forward_spam))
+    application.add_handler(CommandHandler("messagecap", toggle_long_message))
+    application.add_handler(CommandHandler("setmessagecap", set_long_message_limit))
     # Message handler to enforce forward spam protection
-    application.add_handler(MessageHandler(filters.FORWARDED & (~filters.StatusUpdate.ALL), handle_forward_spam))
+    application.add_handler(MessageHandler(filters.FORWARDED & (~filters.StatusUpdate.ALL) & (~filters.COMMAND), handle_forward_spam))
+    # Message handler to enforce long message protection
+    application.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & (~filters.StatusUpdate.ALL) & (~filters.COMMAND), handle_long_message))
     
     logger.info("Settings handlers registered (janitor features disabled)") 
     logger.info(
-        "Command categories: ADMIN-ONLY => ['/amiadmin','/botperms','/toggle_forward_spam']"
+        "Command categories: ADMIN-ONLY => ['/amiadmin','/botperms','/forwardspam','/messagecap','/setmessagecap']"
     )
     logger.info(
-        "Command categories: ACTIVE FEATURES => ['forward spam protection (message handler)']"
+        "Command categories: ACTIVE FEATURES => ['forward spam protection (message handler)','long message protection (message handler)']"
     )
