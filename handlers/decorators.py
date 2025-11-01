@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 logger = logging.getLogger("telegram_bot")
 
 # Target group restriction
-TARGET_GROUP_USERNAME = "robispamgroup"
+TARGET_GROUP_USERNAME = "codenight"
 
 # List of admin user IDs - move to config in production
 ADMIN_USER_IDS = [352475318]  # Replace with actual admin user IDs
@@ -47,7 +47,7 @@ async def is_user_admin(update: Update) -> bool:
 
 
 def only_target_group(func):
-    """Decorator: allow execution only in the target group @robispamgroup."""
+    """Decorator: allow execution only in the target group @codenight."""
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         try:
