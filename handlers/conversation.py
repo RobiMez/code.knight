@@ -261,22 +261,27 @@ async def should_skip_message_protection(update: Update, message) -> bool:
     """
     # Skip if the user is an admin
     if await is_user_admin(update):
+        logger.debug(f"Protection skip: User {update.effective_user.id} is an admin in chat {update.effective_chat.id}")
         return True
     
     # Skip messages from GroupAnonymousBot
     if update.effective_user.id == GROUP_ANONYMOUS_BOT_ID:
+        logger.debug(f"Protection skip: Message from GroupAnonymousBot in chat {update.effective_chat.id}")
         return True
     
     # Skip automatic forwards from linked channels
     if getattr(message, "is_automatic_forward", False) is True:
+        logger.debug(f"Protection skip: Automatic forward from linked channel in chat {update.effective_chat.id}")
         return True
     
     # Skip forwards from Telegram service (777000) - linked channel posts
     if getattr(message, "forward_from", None) and message.forward_from.id == TELEGRAM_SERVICE_USER_ID:
+        logger.debug(f"Protection skip: Forward from Telegram service (777000) in chat {update.effective_chat.id}")
         return True
     
     # Skip messages directly from Telegram service (777000) - linked channel posts
     if update.effective_user.id == TELEGRAM_SERVICE_USER_ID:
+        logger.debug(f"Protection skip: Direct message from Telegram service (777000) in chat {update.effective_chat.id}")
         return True
     
     return False
@@ -288,7 +293,8 @@ async def handle_forward_spam(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not context.chat_data.get("forwardSpamProtectionEnabled", False):
             return
 
-        if not update.effective_message or not update.effective_chat or not update.effective_user:
+        # Only process actual new messages, not reaction updates or other update types
+        if not update.message or not update.effective_message or not update.effective_chat or not update.effective_user:
             return
 
         message = update.effective_message
@@ -384,7 +390,8 @@ async def handle_long_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not context.chat_data.get("longMessageProtectionEnabled", False):
             return
 
-        if not update.effective_message or not update.effective_chat or not update.effective_user:
+        # Only process actual new messages, not reaction updates or other update types
+        if not update.message or not update.effective_message or not update.effective_chat or not update.effective_user:
             return
 
         message = update.effective_message
