@@ -269,6 +269,11 @@ async def should_skip_message_protection(update: Update, message) -> bool:
         logger.debug(f"Protection skip: Message from GroupAnonymousBot in chat {update.effective_chat.id}")
         return True
     
+    # Skip messages sent on behalf of a channel (linked channel posts)
+    if getattr(message, "sender_chat", None) and message.sender_chat.type == "channel":
+        logger.debug(f"Protection skip: Message from channel {message.sender_chat.id} in chat {update.effective_chat.id}")
+        return True
+    
     # Skip automatic forwards from linked channels
     if getattr(message, "is_automatic_forward", False) is True:
         logger.debug(f"Protection skip: Automatic forward from linked channel in chat {update.effective_chat.id}")
@@ -629,8 +634,8 @@ def register_conversation_handlers(application):
     application.add_handler(CommandHandler("setmessagecap", set_long_message_limit))
     # Message handler to enforce forward spam protection
     application.add_handler(MessageHandler(filters.FORWARDED & (~filters.StatusUpdate.ALL) & (~filters.COMMAND), handle_forward_spam))
-    # Message handler to enforce long message protection
-    application.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & (~filters.StatusUpdate.ALL) & (~filters.COMMAND), handle_long_message))
+    # Long message protection in a separate group so it also applies to forwarded messages
+    application.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & (~filters.StatusUpdate.ALL) & (~filters.COMMAND), handle_long_message), group=1)
     
     logger.info("Settings handlers registered (janitor features disabled)") 
     logger.info(

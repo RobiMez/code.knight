@@ -34,8 +34,11 @@ def main() -> None:
         update_interval=60  # Save every 60 seconds instead of every message
     )
     
+    async def post_init(application):
+        logger.info(f"Started bot as @{application.bot.username} (ID: {application.bot.id})")
+
     # Create application with persistence
-    application = ApplicationBuilder().token(token).persistence(persistence).build()
+    application = ApplicationBuilder().token(token).persistence(persistence).post_init(post_init).build()
     
     # Record bot start time - will be persisted automatically
     if "start_time" not in application.bot_data:
@@ -58,7 +61,6 @@ def main() -> None:
     )
     
     # Start the Bot
-    logger.info("Starting bot")
     application.run_polling()
 
 async def track_chat_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
